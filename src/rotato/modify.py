@@ -17,6 +17,13 @@ from rotato.model import (
     RotatoDocument,
 )
 
+LABEL_SLOTS = (
+    "sceneLabelTop",
+    "sceneLabelBottom",
+    "sceneLabelLeft",
+    "sceneLabelRight",
+)
+
 
 def set_background_color(doc: RotatoDocument, r: float, g: float, b: float) -> None:
     """Set a solid background color (0.0-1.0 range)."""
@@ -188,14 +195,29 @@ def _replace_node_texture(archive, node_obj: dict, png_data: bytes) -> None:
 
 
 def _find_and_replace_image(archive, material_prop: dict, png_data: bytes) -> None:
-    """Search a material property subtree for an NSImage/NSBitmapImageRep and replace its PNG data."""
+    """Replace the image on a material property.
+
+    If the property already has contents (NSImage/NSBitmapImageRep), replace the
+    image data in-place. Otherwise inject the PNG bytes as a new $objects entry
+    and point the property's contents at it.
+    """
     contents_ref = material_prop.get("contents")
+
     if contents_ref is None:
-        raise ValueError("Material property has no contents")
+        idx = len(archive.objects)
+        archive.objects.append(png_data)
+        material_prop["contents"] = plistlib.UID(idx)
+        return
 
     contents = archive.resolve(contents_ref)
     if not isinstance(contents, dict):
-        raise ValueError(f"Unexpected contents type: {type(contents)}")
+        if isinstance(contents_ref, plistlib.UID):
+            archive.objects[contents_ref.data] = png_data
+        else:
+            idx = len(archive.objects)
+            archive.objects.append(png_data)
+            material_prop["contents"] = plistlib.UID(idx)
+        return
 
     class_name = archive.get_class_name(contents)
 
@@ -251,3 +273,171 @@ def _replace_bitmap_rep_data(archive, rep: dict, png_data: bytes) -> None:
                 return
 
     raise ValueError("Could not find image data to replace in NSBitmapImageRep")
+
+
+# ---------------------------------------------------------------------------
+# Label helpers
+# ---------------------------------------------------------------------------
+
+def _get_label_store(archive):
+    """Find the SceneLabelStore and return (label_store_dict, keys_list, objects_list)."""
+    root = archive.root
+    label_ref = root.get("sceneLabelStore")
+    if label_ref is None:
+        raise ValueError("No sceneLabelStore in this document")
+    label_store = archive.resolve(label_ref)
+
+    all_ref = label_store.get("all")
+    if all_ref is None:
+        raise ValueError("sceneLabelStore has no 'all' dict")
+    all_dict = archive.resolve(all_ref)
+
+    raw_keys = [archive.resolve(k) for k in all_dict["NS.keys"]]
+    return label_store, raw_keys, all_dict
+
+
+def _find_label(archive, slot: str):
+    """Return the resolved label dict for a named slot."""
+    _, keys, all_dict = _get_label_store(archive)
+    for i, k in enumerate(keys):
+        if k == slot:
+            return archive.resolve(all_dict["NS.objects"][i])
+    raise ValueError(f"Label slot '{slot}' not found. Available: {keys}")
+
+
+def _make_attributed_string_plist(text: str, font_name: str, font_size: float) -> dict:
+    """Create an NSKeyedArchiver plist for an NSMutableAttributedString via PyObjC."""
+    import Foundation
+    import AppKit
+
+    astr = Foundation.NSMutableAttributedString.alloc().initWithString_(text)
+    font = AppKit.NSFont.fontWithName_size_(font_name, font_size)
+    if font is None:
+        font = AppKit.NSFont.systemFontOfSize_(font_size)
+    astr.setAttributes_range_(
+        {AppKit.NSFontAttributeName: font},
+        Foundation.NSMakeRange(0, astr.length()),
+    )
+    archiver = Foundation.NSKeyedArchiver.alloc().initRequiringSecureCoding_(False)
+    archiver.encodeObject_forKey_(astr, "root")
+    archiver.finishEncoding()
+    return plistlib.loads(bytes(archiver.encodedData()))
+
+
+def _graft_plist(target_objects: list, src_plist: dict) -> plistlib.UID:
+    """Graft a standalone NSKeyedArchiver plist's object graph into target_objects.
+
+    Returns the UID (in target_objects) of the source's root object.
+    """
+    src_objects = src_plist["$objects"]
+    src_top = src_plist["$top"]["root"]
+    src_root_idx = src_top.data if isinstance(src_top, plistlib.UID) else src_top
+
+    base = len(target_objects)
+    uid_map = {0: plistlib.UID(0)}
+
+    for old_idx in range(len(src_objects)):
+        if old_idx == 0:
+            continue
+        new_idx = base + old_idx - 1
+        uid_map[old_idx] = plistlib.UID(new_idx)
+
+    def remap(val):
+        if isinstance(val, plistlib.UID):
+            return uid_map.get(val.data, val)
+        if isinstance(val, dict):
+            return {k: remap(v) for k, v in val.items()}
+        if isinstance(val, list):
+            return [remap(v) for v in val]
+        return val
+
+    for old_idx in range(1, len(src_objects)):
+        target_objects.append(remap(src_objects[old_idx]))
+
+    return uid_map[src_root_idx]
+
+
+def _make_nscolor(archive, r: float, g: float, b: float) -> plistlib.UID:
+    """Create a new NSColor object in the archive and return its UID.
+
+    Uses NSColorSpace=1 (device RGB) with NSRGB bytes encoding.
+    """
+    existing_colors = archive.find_objects_by_class("NSColor")
+    if not existing_colors:
+        raise ValueError("No existing NSColor in document to borrow $class from")
+    _, sample = existing_colors[0]
+    class_ref = sample["$class"]
+
+    color_obj = {
+        "$class": class_ref,
+        "NSColorSpace": 1,
+        "NSRGB": f"{r} {g} {b}\x00".encode("ascii"),
+    }
+    idx = len(archive.objects)
+    archive.objects.append(color_obj)
+    return plistlib.UID(idx)
+
+
+def set_label_text(
+    doc: RotatoDocument,
+    slot: str,
+    text: str,
+    font_name: str = "HelveticaNeue-Bold",
+    font_size: float = 3.5,
+) -> None:
+    """Set the text content of a scene label with proper attributed string encoding.
+
+    Args:
+        doc: The RotatoDocument to modify.
+        slot: One of 'sceneLabelTop', 'sceneLabelBottom', 'sceneLabelLeft', 'sceneLabelRight'.
+        text: The text to display.
+        font_name: macOS font name (e.g. 'HelveticaNeue-Bold', 'Helvetica', 'AlBayan-Bold').
+        font_size: Font size in scene units (template scale is ~100, so 2-5 is typical).
+    """
+    if slot not in LABEL_SLOTS:
+        raise ValueError(f"Invalid slot '{slot}'. Must be one of {LABEL_SLOTS}")
+
+    archive = doc.archive
+    label = _find_label(archive, slot)
+
+    astr_plist = _make_attributed_string_plist(text, font_name, font_size)
+    new_uid = _graft_plist(archive.objects, astr_plist)
+    label["text"] = new_uid
+
+
+def set_label_color(
+    doc: RotatoDocument,
+    slot: str,
+    r: float,
+    g: float,
+    b: float,
+) -> None:
+    """Set the color of a scene label.
+
+    Always creates a new NSColor object so labels can have independent colors.
+
+    Args:
+        doc: The RotatoDocument to modify.
+        slot: One of 'sceneLabelTop', 'sceneLabelBottom', 'sceneLabelLeft', 'sceneLabelRight'.
+        r: Red component (0.0 to 1.0).
+        g: Green component (0.0 to 1.0).
+        b: Blue component (0.0 to 1.0).
+    """
+    if slot not in LABEL_SLOTS:
+        raise ValueError(f"Invalid slot '{slot}'. Must be one of {LABEL_SLOTS}")
+
+    archive = doc.archive
+    label = _find_label(archive, slot)
+    label["color"] = _make_nscolor(archive, r, g, b)
+
+
+def clear_label(doc: RotatoDocument, slot: str) -> None:
+    """Clear a label's text (set to empty string)."""
+    if slot not in LABEL_SLOTS:
+        raise ValueError(f"Invalid slot '{slot}'. Must be one of {LABEL_SLOTS}")
+
+    archive = doc.archive
+    label = _find_label(archive, slot)
+    astr_plist = _make_attributed_string_plist("", "HelveticaNeue", 3.0)
+    new_uid = _graft_plist(archive.objects, astr_plist)
+    label["text"] = new_uid

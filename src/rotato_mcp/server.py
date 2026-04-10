@@ -251,6 +251,75 @@ def set_screen_image(path: str, image_path: str) -> str:
 
 
 @mcp.tool()
+def set_label_text(
+    path: str,
+    slot: str,
+    text: str,
+    font_name: str = "HelveticaNeue-Bold",
+    font_size: float = 3.5,
+) -> str:
+    """Set text on a scene label with proper attributed string encoding.
+
+    Uses PyObjC to create a native NSMutableAttributedString with the specified
+    font, which Rotato requires for correct text rendering.
+
+    Args:
+        path: Path to the .rotato file.
+        slot: Label position - one of 'sceneLabelTop', 'sceneLabelBottom',
+              'sceneLabelLeft', 'sceneLabelRight'.
+        text: The text to display. Use empty string to clear.
+        font_name: macOS font name (e.g. 'HelveticaNeue-Bold', 'Helvetica-Light',
+                   'AlBayan-Bold'). Defaults to HelveticaNeue-Bold.
+        font_size: Size in scene units. Template scale is ~100, so 2-5 is typical
+                   (3.5 = headline, 1.8 = subtitle).
+    """
+    doc = rotato.load(path)
+    if text:
+        modify.set_label_text(doc, slot, text, font_name, font_size)
+    else:
+        modify.clear_label(doc, slot)
+    rotato.save(doc, path)
+    return json.dumps({
+        "status": "ok",
+        "slot": slot,
+        "text": text,
+        "font": font_name,
+        "size": font_size,
+    })
+
+
+@mcp.tool()
+def set_label_color(
+    path: str,
+    slot: str,
+    r: float,
+    g: float,
+    b: float,
+) -> str:
+    """Set the color of a scene label.
+
+    Creates a new NSColor object for each call, so labels can have independent
+    colors (Rotato's internal format shares color objects by default).
+
+    Args:
+        path: Path to the .rotato file.
+        slot: Label position - one of 'sceneLabelTop', 'sceneLabelBottom',
+              'sceneLabelLeft', 'sceneLabelRight'.
+        r: Red component (0.0 to 1.0).
+        g: Green component (0.0 to 1.0).
+        b: Blue component (0.0 to 1.0).
+    """
+    doc = rotato.load(path)
+    modify.set_label_color(doc, slot, r, g, b)
+    rotato.save(doc, path)
+    return json.dumps({
+        "status": "ok",
+        "slot": slot,
+        "color": f"rgb({r:.2f}, {g:.2f}, {b:.2f})",
+    })
+
+
+@mcp.tool()
 def open_in_rotato(path: str) -> str:
     """Open a .rotato file in the Rotato app for preview and rendering.
 
