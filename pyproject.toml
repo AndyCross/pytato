@@ -1,0 +1,21 @@
+[project]
+name = "rotato"
+version = "0.1.0"
+description = "Conversational Rotato file builder - read, modify, and create .rotato 3D mockup files"
+readme = "README.md"
+authors = [
+    { name = "Andy Cross", email = "andy@crossmoore.io" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "mcp[cli]>=1.27.0",
+    "pyliblzfse>=0.4.1",
+    "pyobjc-framework-cocoa>=12.1",
+]
+
+[project.scripts]
+rotato-mcp = "rotato_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
