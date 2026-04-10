@@ -9,3 +9,5 @@ wheels/
 # Virtual environments
 .venv
 templates/
+.specstory/history/
+.specstory/statistics.json
